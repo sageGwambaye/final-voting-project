@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.Optional;
+import org.springframework.http.HttpStatus;
 
 @RestController
 @RequestMapping("/api")
@@ -39,11 +40,9 @@ public class VoiceVerificationController {
     @PostMapping(value = "/verify-voice", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> verifyVoice(@RequestParam("audio") MultipartFile audioFile) {
         try {
-            // Get current user
             Authentication auth = SecurityContextHolder.getContext().getAuthentication();
             String userId = auth.getName();
 
-            // Get voter details
             Optional<Voter> voterOpt = voterService.getVoterByRegNo(userId);
             if (voterOpt.isEmpty()) {
                 Map<String, Object> error = new HashMap<>();
@@ -60,43 +59,34 @@ public class VoiceVerificationController {
                 return ResponseEntity.badRequest().body(error);
             }
 
-            // Check rate limiting
             String rateLimitKey = "voice_verify:" + userId;
             ValueOperations<String, String> ops = redisTemplate.opsForValue();
-            
+
             String attempts = ops.get(rateLimitKey);
             int currentAttempts = attempts != null ? Integer.parseInt(attempts) : 0;
 
             if (currentAttempts >= MAX_ATTEMPTS) {
-                Map<String, Object> error = new HashMap<>();
-                error.put("success", false);
-                error.put("message", "Maximum verification attempts reached. Please try again later.");
-                return ResponseEntity.tooManyRequests().body(error);
+                return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                        .body(new ErrorResponse("Too many verification attempts. Please try again later."));
             }
 
-            // Validate file
-            if (audioFile.isEmpty() || audioFile.getSize() > 10 * 1024 * 1024) { // 10MB limit
+            if (audioFile.isEmpty() || audioFile.getSize() > 10 * 1024 * 1024) {
                 Map<String, Object> error = new HashMap<>();
                 error.put("success", false);
                 error.put("message", "Invalid audio file");
                 return ResponseEntity.badRequest().body(error);
             }
 
-            // Create a temporary file to store the audio
             String tempDir = System.getProperty("java.io.tmpdir");
             String fileName = UUID.randomUUID().toString() + ".wav";
             Path tempFile = Path.of(tempDir, fileName);
-            
-            // Save the uploaded file
+
             Files.copy(audioFile.getInputStream(), tempFile, StandardCopyOption.REPLACE_EXISTING);
 
-            // Verify voice against stored sample
             boolean isVerified = verifyVoiceWithModel(tempFile.toString(), voter.getVoiceSampleUrl());
 
-            // Clean up the temporary file
             Files.deleteIfExists(tempFile);
 
-            // Update attempt count
             if (!isVerified) {
                 ops.increment(rateLimitKey);
                 if (currentAttempts == 0) {
@@ -129,14 +119,27 @@ public class VoiceVerificationController {
                 audioFilePath,
                 storedSampleUrl
             );
-            
+
             Process process = processBuilder.start();
             int exitCode = process.waitFor();
-            
+
             return exitCode == 0;
         } catch (Exception e) {
             e.printStackTrace();
             return false;
+        }
+    }
+
+    // Simple ErrorResponse class
+    static class ErrorResponse {
+        private String message;
+
+        public ErrorResponse(String message) {
+            this.message = message;
+        }
+
+        public String getMessage() {
+            return message;
         }
     }
 }
